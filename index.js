@@ -15,7 +15,7 @@ dotenv.config();
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || "-" });
 const elevenLabsApiKey = process.env.ELEVEN_LABS_API_KEY;
-const voiceID = "5vkxOzoz40FrElmLP4P7";
+const voiceID = "86V9x9hrQds83qf7zaGn";
 
 const app = express();
 app.use(cors());
