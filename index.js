@@ -28,6 +28,10 @@ const HIST_DIR = path.join("historial");
 const HIST_PATH = path.join(HIST_DIR, "historial.json");
 const SUMMARY_PATH = path.join(HIST_DIR, "historial_resumen.json");
 
+// Cancelación de sesión: cada /reset aborta el trabajo en vuelo y sube la generación.
+let resetGeneration = 0;
+let sessionController = new AbortController();
+
 function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
 }
@@ -58,6 +62,9 @@ async function clearHistorial() {
 }
 async function resetSession(reason = "manual") {
   log(`Reset de sesión (${reason}) → limpiando audios e historial`);
+  sessionController.abort();
+  sessionController = new AbortController();
+  resetGeneration++;
   await clearAudios();
   await clearHistorial();
 }
@@ -72,14 +79,14 @@ const lipSyncMessage = async (messageIndex) => {
   console.log(`Lip sync done in ${Date.now() - time}ms`);
 };
 
-async function transcribeBufferWithWhisper(buffer, filename, mime) {
+async function transcribeBufferWithWhisper(buffer, filename, mime, signal) {
   const file = await toFile(buffer, filename, { type: mime });
   const resp = await openai.audio.transcriptions.create({
     model: "whisper-1",
     file,
     language: "es",
     response_format: "json",
-  });
+  }, { signal });
   return resp.text || "";
 }
 
@@ -91,20 +98,22 @@ function parseDataUrl(dataUrl) {
   return { buffer, mime, ext };
 }
 
-async function callLocalSentiment(text) {
+async function callLocalSentiment(text, signal) {
   const r = await fetch(`${MODELS_BASE_URL}/sentiment`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
+    signal,
   });
   if (!r.ok) throw new Error(`sentiment ${r.status}`);
   const j = await r.json();
   return (j.sentimiento || "").toLowerCase();
 }
 
-async function callLocalMiaPredict(text, sentimiento) {
+async function callLocalMiaPredict(text, sentimiento, signal) {
   const r = await fetch(`${MODELS_BASE_URL}/mia_predict`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, sentimiento }),
+    signal,
   });
   if (!r.ok) throw new Error(`mia_predict ${r.status}`);
   const j = await r.json();
@@ -149,7 +158,7 @@ function sanitizeSummary(text) {
     .trim();
 }
 
-async function updateRollingSummary(latestTurn) {
+async function updateRollingSummary(latestTurn, signal) {
   const summaryCurrent = await readJsonSafe(SUMMARY_PATH, {});
   const resumenPrevio = summaryCurrent?.resumen || "";
 
@@ -187,7 +196,7 @@ Reescribí el resumen completo actualizado siguiendo las reglas del system promp
       { role: "system", content: [{ type: "input_text", text: system }] },
       { role: "user",   content: [{ type: "input_text", text: user }] },
     ],
-  });
+  }, { signal });
 
   const resumen = sanitizeSummary((resp.output_text || resumenPrevio || "").trim());
   await writeJson(SUMMARY_PATH, {
@@ -196,7 +205,7 @@ Reescribí el resumen completo actualizado siguiendo las reglas del system promp
   });
 }
 
-async function condenseUserMessageIfNeeded(transcript) {
+async function condenseUserMessageIfNeeded(transcript, signal) {
   if (!transcript || transcript.length <= MAX_USER_MSG_CHARS) return transcript;
 
   const system = `
@@ -216,13 +225,13 @@ Condensa el siguiente mensaje del usuario a un máximo de 2-3 frases, sin perder
       { role: "system", content: [{ type: "input_text", text: system }] },
       { role: "user",   content: [{ type: "input_text", text: user }] },
     ],
-  });
+  }, { signal });
 
   const condensado = (resp.output_text || "").trim();
   return condensado || transcript; // fallback al original si la API devuelve vacío
 }
 
-async function generateMiaReply({ transcript, sentimiento, mia_emocion }) {
+async function generateMiaReply({ transcript, sentimiento, mia_emocion, signal }) {
   const summary = await readJsonSafe(SUMMARY_PATH, {});
   const resumen = summary?.resumen || "";
 
@@ -252,7 +261,7 @@ ${transcript}
       { role: "system", content: [{ type: "input_text", text: system }] },
       { role: "user",   content: [{ type: "input_text", text: user }] },
     ],
-  });
+  }, { signal });
 
   return (resp.output_text || "").trim();
 }
@@ -272,6 +281,10 @@ app.post("/reset", async (req, res) => {
 
 // ================== ENDPOINT PRINCIPAL ==================
 app.post("/chat", async (req, res) => {
+  // Snapshot de la sesión al arrancar: si llega un /reset mientras trabajamos,
+  // resetGeneration avanza y sabemos que este turno ya no sirve.
+  const myGeneration = resetGeneration;
+  const mySignal = sessionController.signal;
   try {
     await ensureDirs();
     const userMessage = req.body.message;
@@ -279,28 +292,49 @@ app.post("/chat", async (req, res) => {
     if (typeof userMessage === "string" && userMessage.startsWith("data:audio")) {
       log("🎙️ Audio recibido, transcribiendo...");
       const { buffer, mime, ext } = parseDataUrl(userMessage);
-      let transcript = await transcribeBufferWithWhisper(buffer, `audio.${ext}`, mime);
+      let transcript = await transcribeBufferWithWhisper(buffer, `audio.${ext}`, mime, mySignal);
 
-      transcript = await condenseUserMessageIfNeeded(transcript);
+      transcript = await condenseUserMessageIfNeeded(transcript, mySignal);
 
       let sentimiento = "neutral";
       let mia_emocion = "default";
-      try { sentimiento = await callLocalSentiment(transcript); } catch (e) { console.warn("sentiment:", e.message); }
-      try { mia_emocion = await callLocalMiaPredict(transcript, sentimiento); } catch (e) { console.warn("mia_predict:", e.message); }
+      try { sentimiento = await callLocalSentiment(transcript, mySignal); } catch (e) { console.warn("sentiment:", e.message); }
+      try { mia_emocion = await callLocalMiaPredict(transcript, sentimiento, mySignal); } catch (e) { console.warn("mia_predict:", e.message); }
 
       const historialActual = await readJsonSafe(HIST_PATH, {});
       const nextIndex = Object.keys(historialActual).filter(k => k.startsWith("conversacion_")).length + 1;
       const nextKey = `conversacion_${nextIndex}`;
 
-      const mia_text = await generateMiaReply({ transcript, sentimiento, mia_emocion });
+      const mia_text = await generateMiaReply({ transcript, sentimiento, mia_emocion, signal: mySignal });
       const visuals = mapEmotionToVisuals(mia_emocion, nextIndex - 1);
 
       // Guardamos el texto ANTES de tocar audio: si ElevenLabs falla, el turno no se pierde.
       historialActual[nextKey] = { user_responde: transcript, sentimiento, mia_emocion, mia_text };
-      await writeJson(HIST_PATH, historialActual);
-      await updateRollingSummary(historialActual[nextKey]);
+      if (myGeneration === resetGeneration) {
+        await writeJson(HIST_PATH, historialActual);
+        await updateRollingSummary(historialActual[nextKey], mySignal);
+      } else {
+        log(`⚠️ Sesión reseteada durante ${nextKey}; se descarta la escritura.`);
+      }
 
       log(`💾 Turno guardado como ${nextKey}, generando audio...`);
+
+      if (myGeneration !== resetGeneration) {
+        log(`⚠️ Sesión reseteada antes de generar audio para ${nextKey}; se omite ElevenLabs.`);
+        return res.json({
+          ok: true,
+          transcript,
+          sentimiento,
+          mia_emocion,
+          messages: [
+            {
+              text: mia_text,
+              facialExpression: visuals.facialExpression,
+              animation: visuals.animation,
+            },
+          ],
+        });
+      }
 
       let audio;
       let lipsync;
@@ -418,8 +452,12 @@ app.post("/chat", async (req, res) => {
 
     res.send({ messages });
   } catch (err) {
+    if (err.name === "AbortError") {
+      log(`⚠️ Chat cancelado por reset (gen ${myGeneration}).`);
+      return res.status(200).json({ ok: false, aborted: true, messages: [] });
+    }
     console.error("Error en /chat:", err);
-    res.status(500).json({ error: err.message, messages: [] });
+    return res.status(500).json({ error: err.message, messages: [] });
   }
 });
 
