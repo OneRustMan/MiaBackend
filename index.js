@@ -127,54 +127,58 @@ function mapEmotionToVisuals(mia_emocion, conversationIndex) {
   return { facialExpression, animation: rotatingTalkingAnimation(conversationIndex) };
 }
 
-const MAX_CONTEXT_CHARS = 10000;
-const RECENT_TURNS = 6;
-
-function formatRecentTurns(historialObj) {
-  const keys = Object.keys(historialObj)
-    .filter(k => k.startsWith("conversacion_"))
-    .sort((a, b) => (parseInt(a.split("_")[1]||"0",10) - parseInt(b.split("_")[1]||"0",10)));
-  const slice = keys.slice(-RECENT_TURNS);
-  let acc = "";
-  for (const key of slice) {
-    const c = historialObj[key];
-    acc += `\n[${key}]\nUsuario: ${c?.user_responde ?? ""}\nMIA: ${c?.mia_text ?? "(sin respuesta)"}\n`;
+function getVoiceSettingsForEmotion(mia_emocion) {
+  if (mia_emocion === "alegría") {
+    return { stability: 0.3, similarityBoost: 0.75 };
   }
-  return acc.trim();
+  if (mia_emocion === "amor") {
+    return { stability: 0.45, similarityBoost: 0.8 };
+  }
+  return { stability: 0.5, similarityBoost: 0.75 };
 }
 
-async function maybeUpdateSummary() {
-  const historial = await readJsonSafe(HIST_PATH, {});
-  const serialized = JSON.stringify(historial);
-  if (serialized.length <= MAX_CONTEXT_CHARS) return;
+const MAX_USER_MSG_CHARS = 500;
 
+function sanitizeSummary(text) {
+  if (!text) return text;
+  return text
+    .replace(/^\s*\[.*?\]\s*/gm, "")   // saca cualquier [encabezado] al inicio de línea
+    .replace(/^\s*[-•]\s*/gm, "")       // saca viñetas sueltas
+    .replace(/\n{2,}/g, " ")             // colapsa saltos de línea múltiples
+    .replace(/\n/g, " ")                  // colapsa saltos de línea simples
+    .trim();
+}
+
+async function updateRollingSummary(latestTurn) {
   const summaryCurrent = await readJsonSafe(SUMMARY_PATH, {});
   const resumenPrevio = summaryCurrent?.resumen || "";
 
-  const textToSummarize = `
-[Resumen previo]
-${resumenPrevio}
-
-[Historial completo (compactar lo relevante)]
-${Object.keys(historial).map(k => {
-  const c = historial[k];
-  return `${k}:
-Usuario: ${c?.user_responde || ""}
-MIA: ${c?.mia_text || ""}
-Sentimiento: ${c?.sentimiento || ""}
-MIA_emoción: ${c?.mia_emocion || ""}`;
-}).join("\n\n")}
-`.trim();
-
   const system = `
-Eres un sistema que resume conversaciones de acompañamiento emocional.
-Devuelve un resumen breve, fiel y útil para continuar la conversación en turnos futuros.
-Escribe en español. Sin emojis.
+Eres un sistema que mantiene un resumen narrativo compacto de una conversación de acompañamiento emocional entre un usuario y MIA.
+
+Reglas estrictas que debés seguir siempre:
+- Reescribí el resumen completo desde cero, integrando lo nuevo. NUNCA agregues el turno nuevo como una línea extra al final del resumen anterior — sintetizá todo junto en un texto nuevo y más corto si hace falta.
+- Formato: un único párrafo en prosa corrida. Sin viñetas, sin guiones, sin títulos, sin corchetes, sin las etiquetas "Usuario:" o "MIA:".
+- Extensión máxima: 3 a 4 oraciones en total, sin importar cuántos turnos lleve la conversación. Si ya es largo, comprimí más en vez de seguir agregando.
+- Parafraseá el contenido y el estado emocional; no cites frases textuales de lo que dijeron.
+- Tu respuesta completa ES el resumen y nada más. No incluyas encabezados ni texto explicativo.
+- Escribí en español, sin emojis.
+
+Ejemplo de formato correcto:
+"El usuario suele saludar con ánimo alegre y valora que MIA le pregunte por su día. En la conversación más reciente contó que perdió a su gato y se sintió triste; MIA lo acompañó validando su tristeza y ofreciéndose a escuchar más."
+
+Ejemplo de formato INCORRECTO (no hagas esto):
+"[Resumen acumulado actualizado]
+- Usuario: saluda alegre.
+- MIA: pregunta cómo está."
 `.trim();
 
   const user = `
-Resume de forma compacta el siguiente material. 
-${textToSummarize}
+Resumen actual: ${resumenPrevio || "(vacío, es el primer turno)"}
+
+Nuevo turno — el usuario dijo: "${latestTurn.user_responde}", y MIA respondió: "${latestTurn.mia_text}".
+
+Reescribí el resumen completo actualizado siguiendo las reglas del system prompt.
 `.trim();
 
   const resp = await openai.responses.create({
@@ -185,27 +189,42 @@ ${textToSummarize}
     ],
   });
 
-  const resumen = (resp.output_text || "").trim();
+  const resumen = sanitizeSummary((resp.output_text || resumenPrevio || "").trim());
   await writeJson(SUMMARY_PATH, {
     resumen,
     updatedAt: new Date().toISOString(),
-    total_conversaciones: Object.keys(historial).length,
   });
 }
 
-async function loadContextForLLM() {
-  const historial = await readJsonSafe(HIST_PATH, {});
-  const summary = await readJsonSafe(SUMMARY_PATH, {});
-  const recent = formatRecentTurns(historial);
-  return {
-    resumen: summary?.resumen || "",
-    recientes: recent,
-    total_conversaciones: Object.keys(historial).length,
-  };
+async function condenseUserMessageIfNeeded(transcript) {
+  if (!transcript || transcript.length <= MAX_USER_MSG_CHARS) return transcript;
+
+  const system = `
+Eres un sistema que condensa mensajes largos de un usuario, preservando el sentido, el tono emocional y los datos concretos (nombres, lugares, hechos) que mencione.
+Devuelve SOLO el mensaje condensado, en español, sin comillas ni explicaciones adicionales.
+`.trim();
+
+  const user = `
+Condensa el siguiente mensaje del usuario a un máximo de 2-3 frases, sin perder el sentido:
+
+"${transcript}"
+`.trim();
+
+  const resp = await openai.responses.create({
+    model: "gpt-5-nano",
+    input: [
+      { role: "system", content: [{ type: "input_text", text: system }] },
+      { role: "user",   content: [{ type: "input_text", text: user }] },
+    ],
+  });
+
+  const condensado = (resp.output_text || "").trim();
+  return condensado || transcript; // fallback al original si la API devuelve vacío
 }
 
 async function generateMiaReply({ transcript, sentimiento, mia_emocion }) {
-  const { resumen, recientes, total_conversaciones } = await loadContextForLLM();
+  const summary = await readJsonSafe(SUMMARY_PATH, {});
+  const resumen = summary?.resumen || "";
 
   const system = `
 Eres "MIA", un agente de IA empática y de acompañamiento emocional.
@@ -213,11 +232,8 @@ Respondes SIEMPRE en español, con calidez y claridad, sin emojis.
 `.trim();
 
   const user = `
-[Memoria Resumida]
-${resumen || "(sin resumen aún)"}
-
-[Últimas interacciones relevantes]
-${recientes || "(no hay historial reciente)"}
+[Resumen de la conversación hasta ahora]
+${resumen || "(sin resumen aún, es el primer turno)"}
 
 [Turno actual]
 ${transcript}
@@ -225,10 +241,9 @@ ${transcript}
 [Metadatos]
 - Sentimiento del usuario: ${sentimiento}
 - Emoción de respuesta: ${mia_emocion}
-- Total conversaciones: ${total_conversaciones}
 
 [Instrucciones]
-- Breve (2–4 frases), valida y acompaña. Sin consejos clínicos.
+- Breve (2–3 frases), valida y acompaña. Sin consejos clínicos.
 `.trim();
 
   const resp = await openai.responses.create({
@@ -264,7 +279,9 @@ app.post("/chat", async (req, res) => {
     if (typeof userMessage === "string" && userMessage.startsWith("data:audio")) {
       log("🎙️ Audio recibido, transcribiendo...");
       const { buffer, mime, ext } = parseDataUrl(userMessage);
-      const transcript = await transcribeBufferWithWhisper(buffer, `audio.${ext}`, mime);
+      let transcript = await transcribeBufferWithWhisper(buffer, `audio.${ext}`, mime);
+
+      transcript = await condenseUserMessageIfNeeded(transcript);
 
       let sentimiento = "neutral";
       let mia_emocion = "default";
@@ -278,18 +295,43 @@ app.post("/chat", async (req, res) => {
       const mia_text = await generateMiaReply({ transcript, sentimiento, mia_emocion });
       const visuals = mapEmotionToVisuals(mia_emocion, nextIndex - 1);
 
-      const idx = 0;
-      const fileName = `audios/message_${idx}.mp3`;
-      await voice.textToSpeech(elevenLabsApiKey, voiceID, fileName, mia_text);
-      await lipSyncMessage(idx);
-      const audio = await audioFileToBase64(fileName);
-      const lipsync = await readJsonTranscript(`audios/message_${idx}.json`);
-
+      // Guardamos el texto ANTES de tocar audio: si ElevenLabs falla, el turno no se pierde.
       historialActual[nextKey] = { user_responde: transcript, sentimiento, mia_emocion, mia_text };
       await writeJson(HIST_PATH, historialActual);
-      await maybeUpdateSummary();
+      await updateRollingSummary(historialActual[nextKey]);
 
-      log(`✅ Audio flujo completo generado y guardado como ${nextKey}`);
+      log(`💾 Turno guardado como ${nextKey}, generando audio...`);
+
+      let audio;
+      let lipsync;
+      try {
+        const idx = 0;
+        const fileName = `audios/message_${idx}.mp3`;
+        const { stability, similarityBoost } = getVoiceSettingsForEmotion(mia_emocion);
+
+        await voice.textToSpeech(
+          elevenLabsApiKey,
+          voiceID,
+          fileName,
+          mia_text,
+          stability,
+          similarityBoost,
+          "eleven_multilingual_v2"
+        );
+
+        const stats = await fs.stat(fileName).catch(() => null);
+        if (!stats || stats.size === 0) {
+          throw new Error(`ElevenLabs no generó audio válido en ${fileName} (archivo inexistente o vacío). Revisa la API key, el voiceID o la cuota de ElevenLabs.`);
+        }
+
+        await lipSyncMessage(idx);
+        audio = await audioFileToBase64(fileName);
+        lipsync = await readJsonTranscript(`audios/message_${idx}.json`);
+
+        log(`✅ Audio flujo completo generado para ${nextKey}`);
+      } catch (audioErr) {
+        console.error("Error generando audio/lipsync:", audioErr);
+      }
 
       return res.json({
         ok: true,
@@ -318,7 +360,15 @@ app.post("/chat", async (req, res) => {
       try {
         const idx = 0;
         const fileName = `audios/message_${idx}.mp3`;
-        await voice.textToSpeech(elevenLabsApiKey, voiceID, fileName, mia_text);
+        await voice.textToSpeech(
+          elevenLabsApiKey,
+          voiceID,
+          fileName,
+          mia_text,
+          0.5,
+          0.75,
+          "eleven_multilingual_v2"
+        );
         await lipSyncMessage(idx);
         const audio = await audioFileToBase64(fileName);
         const lipsync = await readJsonTranscript(`audios/message_${idx}.json`);
@@ -352,7 +402,15 @@ app.post("/chat", async (req, res) => {
     for (let i = 0; i < messages.length; i++) {
       const m = messages[i];
       const fileName = `audios/message_${i}.mp3`;
-      await voice.textToSpeech(elevenLabsApiKey, voiceID, fileName, m.text);
+      await voice.textToSpeech(
+        elevenLabsApiKey,
+        voiceID,
+        fileName,
+        m.text,
+        0.5,
+        0.75,
+        "eleven_multilingual_v2"
+      );
       await lipSyncMessage(i);
       m.audio = await audioFileToBase64(fileName);
       m.lipsync = await readJsonTranscript(`audios/message_${i}.json`);
@@ -361,7 +419,7 @@ app.post("/chat", async (req, res) => {
     res.send({ messages });
   } catch (err) {
     console.error("Error en /chat:", err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message, messages: [] });
   }
 });
 
