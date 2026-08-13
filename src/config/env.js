@@ -10,7 +10,11 @@ export const MODELS_BASE_URL = process.env.MIA_MODELS_URL || "http://localhost:8
 
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "-";
 export const ELEVEN_LABS_API_KEY = process.env.ELEVEN_LABS_API_KEY;
-export const VOICE_ID = "86V9x9hrQds83qf7zaGn";
+export const VOICE_ID = process.env.ELEVEN_LABS_VOICE_ID || "86V9x9hrQds83qf7zaGn";
+
+export const OPENAI_TEXT_MODEL = process.env.OPENAI_TEXT_MODEL || "gpt-5-nano";
+export const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1";
+export const ELEVEN_LABS_MODEL_ID = process.env.ELEVEN_LABS_MODEL_ID || "eleven_multilingual_v2";
 
 // Rutas relativas al cwd desde donde se arranca `node index.js` (no a __dirname).
 export const HIST_DIR = path.join("historial");

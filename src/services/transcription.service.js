@@ -1,12 +1,12 @@
 // src/services/transcription.service.js
 import { toFile } from "openai/uploads";
 import { openai } from "../clients/openaiClient.js";
-import { MAX_USER_MSG_CHARS } from "../config/env.js";
+import { MAX_USER_MSG_CHARS, OPENAI_TEXT_MODEL, OPENAI_TRANSCRIBE_MODEL } from "../config/env.js";
 
 export async function transcribeBufferWithWhisper(buffer, filename, mime, signal) {
   const file = await toFile(buffer, filename, { type: mime });
   const resp = await openai.audio.transcriptions.create({
-    model: "whisper-1",
+    model: OPENAI_TRANSCRIBE_MODEL,
     file,
     language: "es",
     response_format: "json",
@@ -37,7 +37,7 @@ Condensa el siguiente mensaje del usuario a un máximo de 2-3 frases, sin perder
 `.trim();
 
   const resp = await openai.responses.create({
-    model: "gpt-5-nano",
+    model: OPENAI_TEXT_MODEL,
     input: [
       { role: "system", content: [{ type: "input_text", text: system }] },
       { role: "user",   content: [{ type: "input_text", text: user }] },

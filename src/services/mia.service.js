@@ -1,6 +1,6 @@
 // src/services/mia.service.js
 import { openai } from "../clients/openaiClient.js";
-import { SUMMARY_PATH } from "../config/env.js";
+import { OPENAI_TEXT_MODEL, SUMMARY_PATH } from "../config/env.js";
 import { readJsonSafe, writeJson } from "../utils/fileStore.js";
 
 export function sanitizeSummary(text) {
@@ -46,7 +46,7 @@ Reescribí el resumen completo actualizado siguiendo las reglas del system promp
 `.trim();
 
   const resp = await openai.responses.create({
-    model: "gpt-5-nano",
+    model: OPENAI_TEXT_MODEL,
     input: [
       { role: "system", content: [{ type: "input_text", text: system }] },
       { role: "user",   content: [{ type: "input_text", text: user }] },
@@ -85,7 +85,7 @@ ${transcript}
 `.trim();
 
   const resp = await openai.responses.create({
-    model: "gpt-5-nano",
+    model: OPENAI_TEXT_MODEL,
     input: [
       { role: "system", content: [{ type: "input_text", text: system }] },
       { role: "user",   content: [{ type: "input_text", text: user }] },
