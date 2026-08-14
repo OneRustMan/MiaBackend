@@ -5,6 +5,7 @@ import express from "express";
 import { PORT } from "./src/config/env.js";
 import { errorHandler } from "./src/middleware/errorHandler.js";
 import chatRouter from "./src/routes/chat.routes.js";
+import dashboardRouter from "./src/routes/dashboard.routes.js";
 import resetRouter from "./src/routes/reset.routes.js";
 
 const app = express();
@@ -13,6 +14,7 @@ app.use(express.json({ limit: "100mb" })); // ok aunque /reset no mande body
 
 app.use("/chat", chatRouter);
 app.use("/reset", resetRouter);
+app.use("/dashboard", dashboardRouter);
 
 // Tiene que ser lo último que se registra, después de todas las rutas.
 app.use(errorHandler);

@@ -4,6 +4,7 @@ import { promises as fs } from "fs";
 import { voice } from "../clients/elevenLabsClient.js";
 import { ELEVEN_LABS_API_KEY, ELEVEN_LABS_MODEL_ID, MAX_USER_MSG_CHARS, VOICE_ID } from "../config/env.js";
 import { audioFileToBase64, lipSyncMessage, readJsonTranscript } from "../services/audio.service.js";
+import { broadcastTurn } from "../services/dashboard.service.js";
 import {
   callLocalMiaPredict,
   callLocalSentiment,
@@ -91,6 +92,9 @@ export const handleChat = asyncHandler(async (req, res) => {
     logStep("generateMiaReply", tReply);
 
     const visuals = mapEmotionToVisuals(mia_emocion, nextIndex - 1);
+
+    // Espejo en vivo para el dashboard de la feria; síncrono, no bloquea el turno.
+    broadcastTurn({ type: "turn", transcript, sentimiento, mia_emocion, mia_text });
 
     // Guardamos el texto ANTES de tocar audio: si ElevenLabs falla, el turno no se pierde.
     historialActual[nextKey] = { user_responde: transcript, sentimiento, mia_emocion, mia_text };

@@ -1,1 +1,14 @@
-{}
+{
+  "conversacion_1": {
+    "user_responde": "Hola mía, adivina cómo me fue en el examen.",
+    "sentimiento": "alegría",
+    "mia_emocion": "alegría",
+    "mia_text": "¡Qué alegría oír eso! Me alegra mucho que te haya ido bien en el examen, debes estar muy orgulloso/a. ¿Qué fue lo que más te gustó de este logro?"
+  },
+  "conversacion_2": {
+    "user_responde": "Hace que baja nota a pesar de no haber sido tanto, aunque eso no es bueno obviamente.",
+    "sentimiento": "tristeza",
+    "mia_emocion": "amor",
+    "mia_text": "Siento que te preocupe la nota, está bien sentirse así. Estoy aquí contigo y celebro tu esfuerzo; ¿qué fue lo que más te gustó del proceso para este examen, a pesar de la nota?"
+  }
+}
