@@ -38,6 +38,7 @@ Condensa el siguiente mensaje del usuario a un máximo de 2-3 frases, sin perder
 
   const resp = await openai.responses.create({
     model: OPENAI_TEXT_MODEL,
+    reasoning: { effort: "minimal" },
     input: [
       { role: "system", content: [{ type: "input_text", text: system }] },
       { role: "user",   content: [{ type: "input_text", text: user }] },
