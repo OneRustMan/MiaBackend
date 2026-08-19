@@ -103,7 +103,24 @@ Reescribí el resumen completo actualizado siguiendo las reglas del system promp
   });
 }
 
-export async function generateMiaReply({ transcript, sentimiento, mia_emocion, signal }) {
+// Pedirle por prompt que "no repita frases de cierre" no alcanza: el modelo
+// vuelve a caer en la misma fórmula ("estoy aquí a tu lado para lo que
+// necesites") turno tras turno. Igual que rotatingTalkingAnimation con las
+// animaciones, acá le sacamos la decisión al modelo: el turno determina qué
+// tipo de cierre le toca, y esa instrucción concreta entra al prompt.
+const CLOSING_STYLES = [
+  "Cerrá con una pregunta abierta sobre cómo se siente, sin usar frases de cierre genéricas.",
+  "Cerrá con una validación breve de lo que sintió, sin hacer pregunta y sin fórmulas de acompañamiento tipo 'estoy aquí a tu lado'.",
+  "Cerrá retomando un detalle CONCRETO de lo que acaba de contar (un nombre, un lugar, un hecho puntual que haya mencionado) y quedate ahí, sin invitar explícitamente a seguir hablando. Ejemplo del tono: en vez de 'cuéntame más sobre cómo te sentiste', algo como 'ese primer kilómetro después de tanto tiempo debe haberse sentido enorme'.",
+  "Cerrá con una frase que nombre algo específico y personal de lo que contó (un nombre propio, un detalle concreto de la situación), en vez de una frase de acompañamiento genérica. Ejemplo del tono: en vez de 'estoy aquí para acompañarte', algo como 'lo de Rocco recién diagnosticado pesa distinto cuando es tan de golpe' o 'tres meses sin ver a tus amigos se nota en cómo lo contás'.",
+];
+
+// turnIndex viene 1-based desde el controller (nextIndex).
+function pickClosingStyle(turnIndex) {
+  return CLOSING_STYLES[(turnIndex - 1) % CLOSING_STYLES.length];
+}
+
+export async function generateMiaReply({ transcript, sentimiento, mia_emocion, turnIndex, signal }) {
   const summary = await readJsonSafe(SUMMARY_PATH, {});
   const resumen = summary?.resumen || "";
 
@@ -117,6 +134,8 @@ export async function generateMiaReply({ transcript, sentimiento, mia_emocion, s
     return na - nb;
   }).at(-1);
   const ultimoTurno = ultimaClave ? historial[ultimaClave] : null;
+
+  const closingStyle = pickClosingStyle(turnIndex);
 
   const system = `
 Eres "MIA", un agente de IA empática y de acompañamiento emocional.
@@ -138,12 +157,13 @@ ${transcript}
 - Emoción de respuesta: ${mia_emocion}
 
 [Instrucciones]
-- Breve (2 frases), valida y acompaña. Sin consejos clínicos.
+- Breve (2 frases). Sin consejos clínicos.
+- ${closingStyle}
 `.trim();
 
   const resp = await openai.responses.create({
     model: OPENAI_TEXT_MODEL,
-    reasoning: { effort: "minimal" },
+    reasoning: { effort: "low" },
     input: [
       { role: "system", content: [{ type: "input_text", text: system }] },
       { role: "user",   content: [{ type: "input_text", text: user }] },
