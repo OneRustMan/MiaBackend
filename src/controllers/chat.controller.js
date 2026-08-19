@@ -13,7 +13,7 @@ import {
 } from "../services/emotion.service.js";
 import { GREETING_TEXT, getGreetingAudio } from "../services/greeting.service.js";
 import { ensureDirs, readHistorial, writeHistorial } from "../services/historial.service.js";
-import { generateMiaReply, updateRollingSummary, waitForPendingSummary } from "../services/mia.service.js";
+import { generateMiaReply } from "../services/mia.service.js";
 import { getSessionSnapshot } from "../services/session.service.js";
 import {
   condenseUserMessageIfNeeded,
@@ -80,13 +80,6 @@ export const handleChat = asyncHandler(async (req, res) => {
     const nextIndex = Object.keys(historialActual).filter(k => k.startsWith("conversacion_")).length + 1;
     const nextKey = `conversacion_${nextIndex}`;
 
-    // generateMiaReply lee historial_resumen.json: si el turno anterior todavía
-    // lo está reescribiendo en background, esperamos acá (y solo acá) para no
-    // leer un resumen viejo o vacío.
-    const waitStartedAt = Date.now();
-    await waitForPendingSummary();
-    logStep("waitForPendingSummary", waitStartedAt);
-
     const tReply = Date.now();
     const mia_text = await generateMiaReply({ transcript, sentimiento, mia_emocion, turnIndex: nextIndex, signal: mySignal });
     logStep("generateMiaReply", tReply);
@@ -102,13 +95,6 @@ export const handleChat = asyncHandler(async (req, res) => {
       const tWrite = Date.now();
       await writeHistorial(historialActual);
       logStep("writeHistorial", tWrite);
-
-      // Fire-and-forget: el resumen no bloquea la respuesta de este turno.
-      // El turno siguiente lo espera con waitForPendingSummary antes de leerlo.
-      const tSummary = Date.now();
-      updateRollingSummary(historialActual[nextKey], mySignal)
-        .then(() => logStep("updateRollingSummary (background)", tSummary))
-        .catch((summaryErr) => console.error("Error actualizando el resumen:", summaryErr));
     } else {
       log(`⚠️ Sesión reseteada durante ${nextKey}; se descarta la escritura.`);
     }
@@ -206,7 +192,7 @@ export const handleChat = asyncHandler(async (req, res) => {
   // Cualquier texto que no sea audio y no esté vacío es un uso
   // indebido de la API: este backend solo acepta audio (data:audio...)
   // o mensaje vacío (saludo). No lo procesamos con IA porque no pasaría
-  // por el pipeline de sentimiento/historial/resumen ni por los guards
+  // por el pipeline de sentimiento/historial ni por los guards
   // de cancelación de sesión que sí respetan las otras dos ramas.
   return res.status(400).json({
     ok: false,
