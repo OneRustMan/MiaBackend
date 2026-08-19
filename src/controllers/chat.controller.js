@@ -88,7 +88,7 @@ export const handleChat = asyncHandler(async (req, res) => {
     logStep("waitForPendingSummary", waitStartedAt);
 
     const tReply = Date.now();
-    const mia_text = await generateMiaReply({ transcript, sentimiento, mia_emocion, signal: mySignal });
+    const mia_text = await generateMiaReply({ transcript, sentimiento, mia_emocion, turnIndex: nextIndex, signal: mySignal });
     logStep("generateMiaReply", tReply);
 
     const visuals = mapEmotionToVisuals(mia_emocion, nextIndex - 1);
