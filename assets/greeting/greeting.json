@@ -1,0 +1,26 @@
+{
+  "metadata": {
+    "soundFile": "/home/booktavo/Desktop/ProjectMia/backend/MiaBackend/assets/greeting/greeting.wav",
+    "duration": 2.41
+  },
+  "mouthCues": [
+    { "start": 0.00, "end": 0.02, "value": "X" },
+    { "start": 0.02, "end": 0.24, "value": "B" },
+    { "start": 0.24, "end": 0.31, "value": "C" },
+    { "start": 0.31, "end": 0.59, "value": "F" },
+    { "start": 0.59, "end": 0.66, "value": "B" },
+    { "start": 0.66, "end": 0.91, "value": "X" },
+    { "start": 0.91, "end": 0.95, "value": "B" },
+    { "start": 0.95, "end": 1.03, "value": "A" },
+    { "start": 1.03, "end": 1.32, "value": "B" },
+    { "start": 1.32, "end": 1.53, "value": "C" },
+    { "start": 1.53, "end": 1.67, "value": "F" },
+    { "start": 1.67, "end": 1.75, "value": "A" },
+    { "start": 1.75, "end": 1.85, "value": "C" },
+    { "start": 1.85, "end": 1.92, "value": "B" },
+    { "start": 1.92, "end": 2.00, "value": "A" },
+    { "start": 2.00, "end": 2.07, "value": "E" },
+    { "start": 2.07, "end": 2.13, "value": "F" },
+    { "start": 2.13, "end": 2.41, "value": "X" }
+  ]
+}
