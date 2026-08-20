@@ -1,4 +1,6 @@
 // src/controllers/chat.controller.js
+import OpenAI from "openai";
+
 import { MAX_USER_MSG_CHARS } from "../config/env.js";
 import { generateSpeechWithTimestamps } from "../services/audio.service.js";
 import { broadcastTurn } from "../services/dashboard.service.js";
@@ -10,7 +12,7 @@ import {
 } from "../services/emotion.service.js";
 import { GREETING_TEXT, getGreetingAudio } from "../services/greeting.service.js";
 import { ensureDirs, readHistorial, writeHistorial } from "../services/historial.service.js";
-import { generateMiaReply } from "../services/mia.service.js";
+import { generateMiaReplyStream } from "../services/mia.service.js";
 import { getSessionSnapshot } from "../services/session.service.js";
 import {
   condenseUserMessageIfNeeded,
@@ -77,78 +79,101 @@ export const handleChat = asyncHandler(async (req, res) => {
     const nextIndex = Object.keys(historialActual).filter(k => k.startsWith("conversacion_")).length + 1;
     const nextKey = `conversacion_${nextIndex}`;
 
-    const tReply = Date.now();
-    const mia_text = await generateMiaReply({ transcript, sentimiento, mia_emocion, turnIndex: nextIndex, signal: mySignal });
-    logStep("generateMiaReply", tReply);
-
     const visuals = mapEmotionToVisuals(mia_emocion, nextIndex - 1);
 
-    // Espejo en vivo para el dashboard de la feria; síncrono, no bloquea el turno.
-    broadcastTurn({ type: "turn", transcript, sentimiento, mia_emocion, mia_text });
+    // A partir de acá la respuesta deja de ser un JSON: cada frase sale por SSE
+    // apenas tiene su audio listo, así MIA empieza a sonar sin esperar el texto
+    // completo. Ya no hay res.json() en el camino feliz de esta rama.
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    });
 
-    // Guardamos el texto ANTES de tocar audio: si ElevenLabs falla, el turno no se pierde.
-    historialActual[nextKey] = { user_responde: transcript, sentimiento, mia_emocion, mia_text };
-    if (myGeneration === getSessionSnapshot().generation) {
-      const tWrite = Date.now();
-      await writeHistorial(historialActual);
-      logStep("writeHistorial", tWrite);
-    } else {
-      log(`⚠️ Sesión reseteada durante ${nextKey}; se descarta la escritura.`);
-    }
+    const { stability, similarityBoost } = getVoiceSettingsForEmotion(mia_emocion);
+    let fullText = "";
+    let sentAny = false;
+    let chunkCount = 0;
+    const tStream = Date.now();
 
-    log(`💾 Turno guardado como ${nextKey}, generando audio...`);
-
-    if (myGeneration !== getSessionSnapshot().generation) {
-      log(`⚠️ Sesión reseteada antes de generar audio para ${nextKey}; se omite ElevenLabs.`);
-      logStep("TOTAL /chat", tChatStart);
-      return res.json({
-        ok: true,
-        transcript,
-        sentimiento,
-        mia_emocion,
-        messages: [
-          {
-            text: mia_text,
-            facialExpression: visuals.facialExpression,
-            animation: visuals.animation,
-          },
-        ],
-      });
-    }
-
-    let audio;
-    let lipsync;
     try {
-      const { stability, similarityBoost } = getVoiceSettingsForEmotion(mia_emocion);
+      for await (const sentence of generateMiaReplyStream({ transcript, sentimiento, mia_emocion, turnIndex: nextIndex, signal: mySignal })) {
+        // Cuánto tardó el modelo en soltar la PRIMERA frase completa: es el
+        // techo real del "MIA empieza a hablar rápido", antes de sumarle TTS.
+        if (!sentAny) logStep("primera frase del modelo (sin TTS)", tStream);
+        fullText += (fullText ? " " : "") + sentence;
 
-      // Audio + timing de cada carácter en una sola respuesta: sin archivos
-      // intermedios, sin ffmpeg y sin rhubarb (por eso tampoco hace falta el
-      // guard de archivo reciclado que había acá).
-      const tTts = Date.now();
-      ({ audio, lipsync } = await generateSpeechWithTimestamps(mia_text, stability, similarityBoost, mySignal));
-      logStep("generateSpeechWithTimestamps (ElevenLabs with-timestamps)", tTts);
+        let chunkAudio;
+        let chunkLipsync;
+        try {
+          const tTts = Date.now();
+          const result = await generateSpeechWithTimestamps(sentence, stability, similarityBoost, mySignal);
+          chunkAudio = result.audio;
+          chunkLipsync = result.lipsync;
+          logStep(`generateSpeechWithTimestamps (chunk ${chunkCount + 1})`, tTts);
+        } catch (ttsErr) {
+          if (ttsErr.name === "AbortError") throw ttsErr;
+          console.error("Error generando audio de un chunk:", ttsErr);
+          // Degradación elegante: mandamos el texto del chunk igual, sin audio.
+        }
 
-      log(`✅ Audio flujo completo generado para ${nextKey}`);
-    } catch (audioErr) {
-      console.error("Error generando audio/lipsync:", audioErr);
-    }
-
-    logStep("TOTAL /chat", tChatStart);
-    return res.json({
-      ok: true,
-      transcript,
-      sentimiento,
-      mia_emocion,
-      messages: [
-        {
-          text: mia_text,
-          audio,
-          lipsync,
+        res.write(`data: ${JSON.stringify({
+          type: "chunk",
+          text: sentence,
+          audio: chunkAudio,
+          lipsync: chunkLipsync,
           facialExpression: visuals.facialExpression,
           animation: visuals.animation,
-        },
-      ],
-    });
+        })}\n\n`);
+        chunkCount += 1;
+        // El número que importa para "MIA empieza a hablar rápido" es este,
+        // no el total del turno.
+        if (!sentAny) logStep("PRIMER CHUNK (texto+audio en el aire)", tChatStart);
+        sentAny = true;
+      }
+
+      // El SDK de OpenAI no lanza cuando se aborta el fetch a mitad del
+      // stream: corta la iteración en silencio y el for-await termina normal.
+      // Sin este chequeo, un /reset en vuelo le mandaría un "done" al frontend
+      // como si el turno se hubiera completado.
+      if (mySignal.aborted) {
+        const abortErr = new Error("Stream abortado por reset");
+        abortErr.name = "AbortError";
+        throw abortErr;
+      }
+
+      // El historial se escribe recién acá porque el mia_text completo no
+      // existe hasta que el stream termina.
+      if (myGeneration === getSessionSnapshot().generation) {
+        const historialFinal = await readHistorial();
+        historialFinal[nextKey] = { user_responde: transcript, sentimiento, mia_emocion, mia_text: fullText };
+        const tWrite = Date.now();
+        await writeHistorial(historialFinal);
+        logStep("writeHistorial", tWrite);
+        broadcastTurn({ type: "turn", transcript, sentimiento, mia_emocion, mia_text: fullText });
+        log(`💾 Turno guardado como ${nextKey} (${chunkCount} chunks).`);
+      } else {
+        log(`⚠️ Sesión reseteada durante ${nextKey}; se descarta la escritura.`);
+      }
+
+      res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+    } catch (err) {
+      if (err.name === "AbortError" || err instanceof OpenAI.APIUserAbortError) {
+        log(`⚠️ Stream cancelado por reset (gen ${myGeneration}).`);
+        res.write(`data: ${JSON.stringify({ type: "aborted" })}\n\n`);
+      } else {
+        console.error("Error en stream de /chat:", err);
+        if (!sentAny) {
+          res.write(`data: ${JSON.stringify({ type: "error", error: err.message })}\n\n`);
+        }
+        // Si ya mandamos chunks, no hay forma limpia de "fallar" a mitad de
+        // camino: el frontend ya recibió audio parcial, cerramos el stream.
+      }
+    }
+
+    logStep(`TOTAL /chat (${chunkCount} chunks)`, tChatStart);
+    res.end();
+    return;
   }
 
   // Texto sin audio → saludo pregenerado desde assets/, 100% desde memoria
