@@ -1,9 +1,8 @@
 // src/controllers/chat.controller.js
-import { promises as fs } from "fs";
+import OpenAI from "openai";
 
-import { voice } from "../clients/elevenLabsClient.js";
-import { ELEVEN_LABS_API_KEY, ELEVEN_LABS_MODEL_ID, MAX_USER_MSG_CHARS, VOICE_ID } from "../config/env.js";
-import { audioFileToBase64, lipSyncMessage, readJsonTranscript } from "../services/audio.service.js";
+import { MAX_USER_MSG_CHARS } from "../config/env.js";
+import { generateSpeechWithTimestamps } from "../services/audio.service.js";
 import { broadcastTurn } from "../services/dashboard.service.js";
 import {
   callLocalMiaPredict,
@@ -13,7 +12,7 @@ import {
 } from "../services/emotion.service.js";
 import { GREETING_TEXT, getGreetingAudio } from "../services/greeting.service.js";
 import { ensureDirs, readHistorial, writeHistorial } from "../services/historial.service.js";
-import { generateMiaReply, updateRollingSummary, waitForPendingSummary } from "../services/mia.service.js";
+import { generateMiaReplyStream } from "../services/mia.service.js";
 import { getSessionSnapshot } from "../services/session.service.js";
 import {
   condenseUserMessageIfNeeded,
@@ -80,115 +79,101 @@ export const handleChat = asyncHandler(async (req, res) => {
     const nextIndex = Object.keys(historialActual).filter(k => k.startsWith("conversacion_")).length + 1;
     const nextKey = `conversacion_${nextIndex}`;
 
-    // generateMiaReply lee historial_resumen.json: si el turno anterior todavía
-    // lo está reescribiendo en background, esperamos acá (y solo acá) para no
-    // leer un resumen viejo o vacío.
-    const waitStartedAt = Date.now();
-    await waitForPendingSummary();
-    logStep("waitForPendingSummary", waitStartedAt);
-
-    const tReply = Date.now();
-    const mia_text = await generateMiaReply({ transcript, sentimiento, mia_emocion, signal: mySignal });
-    logStep("generateMiaReply", tReply);
-
     const visuals = mapEmotionToVisuals(mia_emocion, nextIndex - 1);
 
-    // Espejo en vivo para el dashboard de la feria; síncrono, no bloquea el turno.
-    broadcastTurn({ type: "turn", transcript, sentimiento, mia_emocion, mia_text });
+    // A partir de acá la respuesta deja de ser un JSON: cada frase sale por SSE
+    // apenas tiene su audio listo, así MIA empieza a sonar sin esperar el texto
+    // completo. Ya no hay res.json() en el camino feliz de esta rama.
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    });
 
-    // Guardamos el texto ANTES de tocar audio: si ElevenLabs falla, el turno no se pierde.
-    historialActual[nextKey] = { user_responde: transcript, sentimiento, mia_emocion, mia_text };
-    if (myGeneration === getSessionSnapshot().generation) {
-      const tWrite = Date.now();
-      await writeHistorial(historialActual);
-      logStep("writeHistorial", tWrite);
+    const { stability, similarityBoost } = getVoiceSettingsForEmotion(mia_emocion);
+    let fullText = "";
+    let sentAny = false;
+    let chunkCount = 0;
+    const tStream = Date.now();
 
-      // Fire-and-forget: el resumen no bloquea la respuesta de este turno.
-      // El turno siguiente lo espera con waitForPendingSummary antes de leerlo.
-      const tSummary = Date.now();
-      updateRollingSummary(historialActual[nextKey], mySignal)
-        .then(() => logStep("updateRollingSummary (background)", tSummary))
-        .catch((summaryErr) => console.error("Error actualizando el resumen:", summaryErr));
-    } else {
-      log(`⚠️ Sesión reseteada durante ${nextKey}; se descarta la escritura.`);
-    }
-
-    log(`💾 Turno guardado como ${nextKey}, generando audio...`);
-
-    if (myGeneration !== getSessionSnapshot().generation) {
-      log(`⚠️ Sesión reseteada antes de generar audio para ${nextKey}; se omite ElevenLabs.`);
-      logStep("TOTAL /chat", tChatStart);
-      return res.json({
-        ok: true,
-        transcript,
-        sentimiento,
-        mia_emocion,
-        messages: [
-          {
-            text: mia_text,
-            facialExpression: visuals.facialExpression,
-            animation: visuals.animation,
-          },
-        ],
-      });
-    }
-
-    let audio;
-    let lipsync;
     try {
-      const idx = 0;
-      const fileName = `audios/message_${idx}.mp3`;
-      // Si textToSpeech falla sin lanzar, el guard de abajo debe ver que NO hay archivo:
-      // sin este borrado, un mp3 de una corrida anterior pasaría el chequeo y se
-      // devolvería audio viejo que no corresponde al mia_text actual.
-      await fs.rm(fileName, { force: true }).catch(() => {});
-      const { stability, similarityBoost } = getVoiceSettingsForEmotion(mia_emocion);
+      for await (const sentence of generateMiaReplyStream({ transcript, sentimiento, mia_emocion, turnIndex: nextIndex, signal: mySignal })) {
+        // Cuánto tardó el modelo en soltar la PRIMERA frase completa: es el
+        // techo real del "MIA empieza a hablar rápido", antes de sumarle TTS.
+        if (!sentAny) logStep("primera frase del modelo (sin TTS)", tStream);
+        fullText += (fullText ? " " : "") + sentence;
 
-      const tTts = Date.now();
-      await voice.textToSpeech(
-        ELEVEN_LABS_API_KEY,
-        VOICE_ID,
-        fileName,
-        mia_text,
-        stability,
-        similarityBoost,
-        ELEVEN_LABS_MODEL_ID
-      );
-      logStep("voice.textToSpeech (ElevenLabs)", tTts);
+        let chunkAudio;
+        let chunkLipsync;
+        try {
+          const tTts = Date.now();
+          const result = await generateSpeechWithTimestamps(sentence, stability, similarityBoost, mySignal);
+          chunkAudio = result.audio;
+          chunkLipsync = result.lipsync;
+          logStep(`generateSpeechWithTimestamps (chunk ${chunkCount + 1})`, tTts);
+        } catch (ttsErr) {
+          if (ttsErr.name === "AbortError") throw ttsErr;
+          console.error("Error generando audio de un chunk:", ttsErr);
+          // Degradación elegante: mandamos el texto del chunk igual, sin audio.
+        }
 
-      const stats = await fs.stat(fileName).catch(() => null);
-      if (!stats || stats.size === 0) {
-        throw new Error(`ElevenLabs no generó audio válido en ${fileName} (archivo inexistente o vacío). Revisa la API key, el voiceID o la cuota de ElevenLabs.`);
-      }
-
-      const tLipsync = Date.now();
-      await lipSyncMessage(idx);
-      logStep("lipSyncMessage (ffmpeg+rhubarb)", tLipsync);
-
-      audio = await audioFileToBase64(fileName);
-      lipsync = await readJsonTranscript(`audios/message_${idx}.json`);
-
-      log(`✅ Audio flujo completo generado para ${nextKey}`);
-    } catch (audioErr) {
-      console.error("Error generando audio/lipsync:", audioErr);
-    }
-
-    logStep("TOTAL /chat", tChatStart);
-    return res.json({
-      ok: true,
-      transcript,
-      sentimiento,
-      mia_emocion,
-      messages: [
-        {
-          text: mia_text,
-          audio,
-          lipsync,
+        res.write(`data: ${JSON.stringify({
+          type: "chunk",
+          text: sentence,
+          audio: chunkAudio,
+          lipsync: chunkLipsync,
           facialExpression: visuals.facialExpression,
           animation: visuals.animation,
-        },
-      ],
-    });
+        })}\n\n`);
+        chunkCount += 1;
+        // El número que importa para "MIA empieza a hablar rápido" es este,
+        // no el total del turno.
+        if (!sentAny) logStep("PRIMER CHUNK (texto+audio en el aire)", tChatStart);
+        sentAny = true;
+      }
+
+      // El SDK de OpenAI no lanza cuando se aborta el fetch a mitad del
+      // stream: corta la iteración en silencio y el for-await termina normal.
+      // Sin este chequeo, un /reset en vuelo le mandaría un "done" al frontend
+      // como si el turno se hubiera completado.
+      if (mySignal.aborted) {
+        const abortErr = new Error("Stream abortado por reset");
+        abortErr.name = "AbortError";
+        throw abortErr;
+      }
+
+      // El historial se escribe recién acá porque el mia_text completo no
+      // existe hasta que el stream termina.
+      if (myGeneration === getSessionSnapshot().generation) {
+        const historialFinal = await readHistorial();
+        historialFinal[nextKey] = { user_responde: transcript, sentimiento, mia_emocion, mia_text: fullText };
+        const tWrite = Date.now();
+        await writeHistorial(historialFinal);
+        logStep("writeHistorial", tWrite);
+        broadcastTurn({ type: "turn", transcript, sentimiento, mia_emocion, mia_text: fullText });
+        log(`💾 Turno guardado como ${nextKey} (${chunkCount} chunks).`);
+      } else {
+        log(`⚠️ Sesión reseteada durante ${nextKey}; se descarta la escritura.`);
+      }
+
+      res.write(`data: ${JSON.stringify({ type: "done" })}\n\n`);
+    } catch (err) {
+      if (err.name === "AbortError" || err instanceof OpenAI.APIUserAbortError) {
+        log(`⚠️ Stream cancelado por reset (gen ${myGeneration}).`);
+        res.write(`data: ${JSON.stringify({ type: "aborted" })}\n\n`);
+      } else {
+        console.error("Error en stream de /chat:", err);
+        if (!sentAny) {
+          res.write(`data: ${JSON.stringify({ type: "error", error: err.message })}\n\n`);
+        }
+        // Si ya mandamos chunks, no hay forma limpia de "fallar" a mitad de
+        // camino: el frontend ya recibió audio parcial, cerramos el stream.
+      }
+    }
+
+    logStep(`TOTAL /chat (${chunkCount} chunks)`, tChatStart);
+    res.end();
+    return;
   }
 
   // Texto sin audio → saludo pregenerado desde assets/, 100% desde memoria
