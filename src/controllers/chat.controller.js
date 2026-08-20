@@ -191,7 +191,7 @@ export const handleChat = asyncHandler(async (req, res) => {
   // Cualquier texto que no sea audio y no esté vacío es un uso
   // indebido de la API: este backend solo acepta audio (data:audio...)
   // o mensaje vacío (saludo). No lo procesamos con IA porque no pasaría
-  // por el pipeline de sentimiento/historial ni por los guards
+  // por el pipeline de sentimiento/historial/resumen ni por los guards
   // de cancelación de sesión que sí respetan las otras dos ramas.
   return res.status(400).json({
     ok: false,
