@@ -1,9 +1,6 @@
 // src/controllers/chat.controller.js
-import { promises as fs } from "fs";
-
-import { voice } from "../clients/elevenLabsClient.js";
-import { ELEVEN_LABS_API_KEY, ELEVEN_LABS_MODEL_ID, MAX_USER_MSG_CHARS, VOICE_ID } from "../config/env.js";
-import { audioFileToBase64, lipSyncMessage, readJsonTranscript } from "../services/audio.service.js";
+import { MAX_USER_MSG_CHARS } from "../config/env.js";
+import { generateSpeechWithTimestamps } from "../services/audio.service.js";
 import { broadcastTurn } from "../services/dashboard.service.js";
 import {
   callLocalMiaPredict,
@@ -122,37 +119,14 @@ export const handleChat = asyncHandler(async (req, res) => {
     let audio;
     let lipsync;
     try {
-      const idx = 0;
-      const fileName = `audios/message_${idx}.mp3`;
-      // Si textToSpeech falla sin lanzar, el guard de abajo debe ver que NO hay archivo:
-      // sin este borrado, un mp3 de una corrida anterior pasaría el chequeo y se
-      // devolvería audio viejo que no corresponde al mia_text actual.
-      await fs.rm(fileName, { force: true }).catch(() => {});
       const { stability, similarityBoost } = getVoiceSettingsForEmotion(mia_emocion);
 
+      // Audio + timing de cada carácter en una sola respuesta: sin archivos
+      // intermedios, sin ffmpeg y sin rhubarb (por eso tampoco hace falta el
+      // guard de archivo reciclado que había acá).
       const tTts = Date.now();
-      await voice.textToSpeech(
-        ELEVEN_LABS_API_KEY,
-        VOICE_ID,
-        fileName,
-        mia_text,
-        stability,
-        similarityBoost,
-        ELEVEN_LABS_MODEL_ID
-      );
-      logStep("voice.textToSpeech (ElevenLabs)", tTts);
-
-      const stats = await fs.stat(fileName).catch(() => null);
-      if (!stats || stats.size === 0) {
-        throw new Error(`ElevenLabs no generó audio válido en ${fileName} (archivo inexistente o vacío). Revisa la API key, el voiceID o la cuota de ElevenLabs.`);
-      }
-
-      const tLipsync = Date.now();
-      await lipSyncMessage(idx);
-      logStep("lipSyncMessage (ffmpeg+rhubarb)", tLipsync);
-
-      audio = await audioFileToBase64(fileName);
-      lipsync = await readJsonTranscript(`audios/message_${idx}.json`);
+      ({ audio, lipsync } = await generateSpeechWithTimestamps(mia_text, stability, similarityBoost, mySignal));
+      logStep("generateSpeechWithTimestamps (ElevenLabs with-timestamps)", tTts);
 
       log(`✅ Audio flujo completo generado para ${nextKey}`);
     } catch (audioErr) {
