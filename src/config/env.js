@@ -22,3 +22,9 @@ export const HIST_PATH = path.join(HIST_DIR, "historial.json");
 export const SUMMARY_PATH = path.join(HIST_DIR, "historial_resumen.json");
 
 export const MAX_USER_MSG_CHARS = 500;
+
+// Modelo de transcripción en vivo (Realtime API). Intercambiable por .env para poder
+// comparar modelos sin tocar código, igual que OPENAI_TEXT_MODEL / OPENAI_TRANSCRIBE_MODEL.
+// Ojo: no todos los modelos aceptan las mismas opciones (ver realtimeTranscription.service.js).
+export const OPENAI_REALTIME_TRANSCRIBE_MODEL =
+  process.env.OPENAI_REALTIME_TRANSCRIBE_MODEL || "gpt-realtime-whisper";
